@@ -1,0 +1,12 @@
+node_modules
+.next
+.env
+.env.local
+tsconfig.tsbuildinfo
+__pycache__
+*.pyc
+.DS_Store
+Thumbs.db
+models/
+scripts/trading/
+app/api/trading/stock/
