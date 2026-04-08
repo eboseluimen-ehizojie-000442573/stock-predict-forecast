@@ -7,6 +7,5 @@ __pycache__
 *.pyc
 .DS_Store
 Thumbs.db
-models/
-scripts/trading/
-app/api/trading/stock/
+
+
