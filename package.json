@@ -8,6 +8,7 @@
     "start": "next start -p 3000"
   },
   "dependencies": {
+    "@next/third-parties": "^16.2.3",
     "axios": "^1.6.0",
     "chart.js": "^4.4.0",
     "framer-motion": "^12.38.0",
