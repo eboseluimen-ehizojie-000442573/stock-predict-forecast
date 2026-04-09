@@ -1,4 +1,4 @@
-// PATH: C:\Users\prome\anaconda_projects\capstone_stockPredict\web\app\trading\stock\page.tsx
+// PATH: C:\Users\prome\anaconda_projects\capstone_stockPredict\stock-predict-forecast\app\trading\stock\page.tsx
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -143,6 +143,30 @@ type SortField =
   | "P50Price"
   | "Close";
 
+type RawCsvRow = Record<string, string>;
+type NumericField = keyof Pick<
+  TableRow,
+  | "Close"
+  | "TargetPrice"
+  | "PredPrice"
+  | "TargetReturn"
+  | "PredReturn"
+  | "PredProbUp"
+  | "Position"
+  | "StrategyReturn"
+  | "PredictionAccuracyPct"
+  | "PriceError"
+  | "AbsPriceError"
+  | "ForecastPredictedAccuracyPct"
+  | "ForecastConfidencePct"
+  | "ForecastVolatilityPct"
+  | "ForecastMoveVsVol"
+  | "P10Price"
+  | "P50Price"
+  | "P90Price"
+  | "FinalDecisionScore"
+>;
+
 const datasetOptions: Array<{ value: DatasetMode; label: string }> = [
   { value: "server_combined", label: "Bundled 14-ticker web CSV" },
   { value: "server_seen_10", label: "Bundled 10-ticker web CSV" },
@@ -150,6 +174,20 @@ const datasetOptions: Array<{ value: DatasetMode; label: string }> = [
   { value: "upload", label: "Upload scored CSV" },
   { value: "default", label: "Legacy default server dataset" },
 ];
+
+const datasetUrlMap: Record<Exclude<DatasetMode, "upload">, string> = {
+  server_combined: "/data/stock_all_14_tickers_scored_for_web_365d_final.csv",
+  server_seen_10: "/data/stock_seen_10_tickers_scored_for_web_365d_final.csv",
+  server_unseen_4: "/data/stock_unseen_4_tickers_scored_for_web_365d_final.csv",
+  default: "/data/stock_all_14_tickers_scored_for_web_365d_final.csv",
+};
+
+const datasetLabelMap: Record<Exclude<DatasetMode, "upload">, string> = {
+  server_combined: "Bundled 14-ticker web CSV",
+  server_seen_10: "Bundled 10-ticker web CSV",
+  server_unseen_4: "Bundled 4-ticker web CSV",
+  default: "Legacy default server dataset",
+};
 
 const seenTickers = ["AAPL", "AMZN", "BA", "GOOG", "IBM", "MGM", "MSFT", "T", "TSLA", "sp500"];
 const unseenTickers = ["JPM", "NFLX", "NVDA", "WMT"];
@@ -179,6 +217,28 @@ const sortOptions: Array<{ value: SortField; label: string }> = [
   { value: "Close", label: "Close" },
 ];
 
+const numericFields: NumericField[] = [
+  "Close",
+  "TargetPrice",
+  "PredPrice",
+  "TargetReturn",
+  "PredReturn",
+  "PredProbUp",
+  "Position",
+  "StrategyReturn",
+  "PredictionAccuracyPct",
+  "PriceError",
+  "AbsPriceError",
+  "ForecastPredictedAccuracyPct",
+  "ForecastConfidencePct",
+  "ForecastVolatilityPct",
+  "ForecastMoveVsVol",
+  "P10Price",
+  "P50Price",
+  "P90Price",
+  "FinalDecisionScore",
+];
+
 function fmtNumber(value: number | null | undefined, digits = 4): string {
   if (value === null || value === undefined || Number.isNaN(value)) return "—";
   return Number(value).toFixed(digits);
@@ -195,6 +255,297 @@ function fmtSigned(value: number | null | undefined, digits = 4): string {
   return `${n >= 0 ? "+" : ""}${n.toFixed(digits)}`;
 }
 
+function parseCsv(text: string): RawCsvRow[] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let value = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+    const next = text[i + 1];
+
+    if (char === '"') {
+      if (inQuotes && next === '"') {
+        value += '"';
+        i += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+
+    if (char === "," && !inQuotes) {
+      row.push(value);
+      value = "";
+      continue;
+    }
+
+    if ((char === "\n" || char === "\r") && !inQuotes) {
+      if (char === "\r" && next === "\n") i += 1;
+      row.push(value);
+      value = "";
+      if (row.some((cell) => cell.trim() !== "")) {
+        rows.push(row);
+      }
+      row = [];
+      continue;
+    }
+
+    value += char;
+  }
+
+  row.push(value);
+  if (row.some((cell) => cell.trim() !== "")) {
+    rows.push(row);
+  }
+
+  if (rows.length === 0) return [];
+  const headers = rows[0].map((item) => item.trim());
+  return rows.slice(1).map((cells) => {
+    const record: RawCsvRow = {};
+    headers.forEach((header, index) => {
+      record[header] = (cells[index] ?? "").trim();
+    });
+    return record;
+  });
+}
+
+function parseNumber(value: string | undefined): number | null {
+  if (value === undefined) return null;
+  const cleaned = value.trim();
+  if (!cleaned || cleaned === "—" || cleaned.toLowerCase() === "nan" || cleaned.toLowerCase() === "null") {
+    return null;
+  }
+  const parsed = Number(cleaned);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeSection(value: string | undefined): "Historical" | "Forecast" {
+  return value?.toLowerCase() === "forecast" ? "Forecast" : "Historical";
+}
+
+function normalizeTableRow(row: RawCsvRow): TableRow {
+  const section = normalizeSection(row.Section);
+  const base: TableRow = {
+    Date: row.Date || "",
+    Ticker: row.Ticker || "",
+    Section: section,
+    Close: null,
+    TargetPrice: null,
+    PredPrice: null,
+    TargetReturn: null,
+    PredReturn: null,
+    PredProbUp: null,
+    Action: row.Action || "",
+    Position: null,
+    StrategyReturn: null,
+    PredictionAccuracyPct: null,
+    PriceError: null,
+    AbsPriceError: null,
+    ForecastPredictedAccuracyPct: null,
+    ForecastConfidencePct: null,
+    ForecastVolatilityPct: null,
+    ForecastMoveVsVol: null,
+    P10Price: null,
+    P50Price: null,
+    P90Price: null,
+    FinalDecision: row.FinalDecision || null,
+    DecisionGrade: row.DecisionGrade || null,
+    FinalDecisionScore: null,
+  };
+
+  numericFields.forEach((field) => {
+    base[field] = parseNumber(row[field]);
+  });
+
+  if (base.P50Price === null) {
+    base.P50Price = base.PredPrice;
+  }
+
+  return base;
+}
+
+function sortRows(rows: TableRow[], sortBy: SortField, rowMode: "Top" | "Bottom", rowCount: number): TableRow[] {
+  const sorted = [...rows].sort((a, b) => {
+    if (sortBy === "Date") {
+      return a.Date.localeCompare(b.Date);
+    }
+
+    const getNumericValue = (item: TableRow): number => {
+      if (sortBy === "TradeStrategyReturn") return item.StrategyReturn ?? Number.NEGATIVE_INFINITY;
+      const value = (item as unknown as Record<string, number | null | undefined>)[sortBy];
+      return value ?? Number.NEGATIVE_INFINITY;
+    };
+
+    const av = getNumericValue(a);
+    const bv = getNumericValue(b);
+
+    if (av === bv) return a.Date.localeCompare(b.Date);
+    return rowMode === "Top" ? bv - av : av - bv;
+  });
+
+  if (sortBy === "Date") {
+    return rowMode === "Top" ? sorted.slice(0, rowCount) : sorted.slice(Math.max(0, sorted.length - rowCount));
+  }
+
+  return sorted.slice(0, rowCount);
+}
+
+function buildApiSuccess(
+  rawRows: RawCsvRow[],
+  state: {
+    datasetMode: DatasetMode;
+    ticker: string;
+    startDate: string;
+    endDate: string;
+    rowMode: "Top" | "Bottom";
+    rowCount: number;
+    sortBy: SortField;
+    uploadedCsvText: string | null;
+  }
+): ApiSuccess {
+  const allRows = rawRows.map(normalizeTableRow).filter((row) => row.Date && row.Ticker);
+  const tickers = Array.from(new Set(allRows.map((row) => row.Ticker))).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+
+  const resolvedTicker = state.ticker || tickers[0] || "";
+  const tickerRows = allRows.filter((row) => row.Ticker === resolvedTicker);
+  const dates = tickerRows.map((row) => row.Date).sort();
+
+  const availableMin = dates[0] ?? null;
+  const availableMax = dates[dates.length - 1] ?? null;
+
+  const resolvedStart = state.startDate || availableMin || "";
+  const resolvedEnd = state.endDate || availableMax || "";
+
+  const windowRows = tickerRows.filter((row) => {
+    const afterStart = !resolvedStart || row.Date >= resolvedStart;
+    const beforeEnd = !resolvedEnd || row.Date <= resolvedEnd;
+    return afterStart && beforeEnd;
+  });
+
+  const historicalRows = windowRows.filter((row) => row.Section === "Historical");
+  const forecastRows = windowRows.filter((row) => row.Section === "Forecast");
+
+  const directionRows = historicalRows.filter((row) => row.PredReturn !== null && row.TargetReturn !== null);
+  const directionCorrect = directionRows.filter((row) => {
+    if (row.PredReturn === null || row.TargetReturn === null) return false;
+    const predSign = row.PredReturn >= 0 ? 1 : -1;
+    const targetSign = row.TargetReturn >= 0 ? 1 : -1;
+    return predSign === targetSign;
+  }).length;
+
+  const directionAccuracy = directionRows.length ? (directionCorrect / directionRows.length) * 100 : null;
+
+  const predictionRows = historicalRows.filter((row) => row.PredictionAccuracyPct !== null);
+  const predictionAccuracy = predictionRows.length
+    ? predictionRows.reduce((sum, row) => sum + (row.PredictionAccuracyPct ?? 0), 0) / predictionRows.length
+    : null;
+
+  const strategyRows = historicalRows.filter((row) => row.StrategyReturn !== null);
+  const totalProfit = strategyRows.reduce((sum, row) => sum + Math.max(row.StrategyReturn ?? 0, 0), 0);
+  const totalLoss = strategyRows.reduce((sum, row) => sum + Math.min(row.StrategyReturn ?? 0, 0), 0);
+  const netProfit = strategyRows.reduce((sum, row) => sum + (row.StrategyReturn ?? 0), 0);
+
+  const winRows = strategyRows.filter((row) => (row.StrategyReturn ?? 0) > 0).length;
+  const winRate = strategyRows.length ? (winRows / strategyRows.length) * 100 : 0;
+  const bestTrade = strategyRows.length ? Math.max(...strategyRows.map((row) => row.StrategyReturn ?? 0)) : 0;
+  const worstTrade = strategyRows.length ? Math.min(...strategyRows.map((row) => row.StrategyReturn ?? 0)) : 0;
+  const avgTrade = strategyRows.length ? netProfit / strategyRows.length : 0;
+
+  const eventCount = strategyRows.filter((row) => (row.StrategyReturn ?? 0) !== 0).length;
+  const forecastStart = forecastRows[0]?.Date ?? null;
+  const latestRow = windowRows[windowRows.length - 1] ?? null;
+  const latestForecastRow = forecastRows[forecastRows.length - 1] ?? null;
+  const modelName = "Direct CSV Web Load";
+
+  const graph: GraphPoint[] = windowRows.map((row) => ({
+    Date: row.Date,
+    Section: row.Section,
+    ActualPrice: row.Close,
+    PredPriceHistorical: row.Section === "Historical" ? row.PredPrice : null,
+    PredPriceForecast: row.Section === "Forecast" ? (row.P50Price ?? row.PredPrice) : null,
+    P10Price: row.P10Price,
+    P50Price: row.P50Price ?? row.PredPrice,
+    P90Price: row.P90Price,
+    EntryPrice: row.Action?.toLowerCase().includes("buy") ? row.Close : null,
+    ExitPrice: row.Action?.toLowerCase().includes("sell") ? row.Close : null,
+  }));
+
+  const sourceLabel =
+    state.datasetMode === "upload"
+      ? `Uploaded CSV${state.uploadedCsvText ? "" : " (no file text found)"}`
+      : datasetLabelMap[state.datasetMode];
+
+  const table = sortRows(windowRows, state.sortBy, state.rowMode, state.rowCount);
+
+  return {
+    ok: true,
+    setup: {
+      ok: true,
+      pythonExists: false,
+      modelExists: false,
+      dataExists: true,
+      pythonPath: null,
+      modelPath: null,
+      dataPath: state.datasetMode === "upload" ? "Uploaded in browser" : datasetUrlMap[state.datasetMode],
+      messages: [
+        "Dashboard is loading the scored CSV directly from public/data or uploaded browser content.",
+        "No backend Python environment is required for the deployed web app.",
+        "Ticker changes and CSV uploads refresh automatically. Other control changes wait for Refresh now.",
+      ],
+      bundledData: {
+        combined: datasetUrlMap.server_combined,
+        seen10: datasetUrlMap.server_seen_10,
+        unseen4: datasetUrlMap.server_unseen_4,
+      },
+    },
+    tickers,
+    summary: {
+      ticker: resolvedTicker,
+      startDate: resolvedStart || availableMin || "",
+      endDate: resolvedEnd || availableMax || "",
+      directionAccuracy,
+      predictionAccuracy,
+      totalProfit,
+      totalLoss,
+      netProfit,
+      winRate,
+      bestTrade,
+      worstTrade,
+      avgTrade,
+      eventCount,
+      rowsInWindow: windowRows.length,
+      scoredRows: tickerRows.length,
+      historicalRows: historicalRows.length,
+      forecastRows: forecastRows.length,
+      forecastStart,
+      sourceLabel,
+      modelName,
+      lastClose: latestRow?.Close ?? null,
+      latestForecastP10: latestForecastRow?.P10Price ?? null,
+      latestForecastP50: latestForecastRow?.P50Price ?? latestForecastRow?.PredPrice ?? null,
+      latestForecastP90: latestForecastRow?.P90Price ?? null,
+      latestFinalDecision: latestForecastRow?.FinalDecision ?? latestForecastRow?.Action ?? null,
+    },
+    graph,
+    table,
+    availableDateRange: { min: availableMin, max: availableMax },
+    defaults: {
+      ticker: resolvedTicker || null,
+      startDate: availableMin,
+      endDate: availableMax,
+      rowMode: "Bottom",
+      rowCount: 10,
+      sortBy: "Date",
+    },
+    info: [
+      `${sourceLabel} loaded successfully.`,
+      `Ticker count detected: ${tickers.length}.`,
+      `Current window rows: ${windowRows.length}. Historical: ${historicalRows.length}. Forecast: ${forecastRows.length}.`,
+    ],
+  };
+}
 
 function ChartTooltip({
   active,
@@ -256,8 +607,6 @@ function ChartTooltip({
   );
 }
 
-
-
 function ChartLegend(props: any) {
   const payload = Array.isArray(props?.payload) ? props.payload : [];
 
@@ -309,30 +658,6 @@ function ChartLegend(props: any) {
       ))}
     </div>
   );
-}
-
-function buildRequestBody(
-  fileText: string | null,
-  state: {
-    datasetMode: DatasetMode;
-    ticker: string;
-    startDate: string;
-    endDate: string;
-    rowMode: "Top" | "Bottom";
-    rowCount: number;
-    sortBy: SortField;
-  }
-) {
-  return {
-    datasetMode: state.datasetMode,
-    uploadedCsvText: fileText,
-    ticker: state.ticker || null,
-    startDate: state.startDate || null,
-    endDate: state.endDate || null,
-    rowMode: state.rowMode,
-    rowCount: state.rowCount,
-    sortBy: state.sortBy,
-  };
 }
 
 function EntryMarker(props: any) {
@@ -391,8 +716,7 @@ export default function StockPage() {
       sortBy: overrides?.sortBy ?? sortBy,
     };
 
-    const body = buildRequestBody(effectiveState.uploadedCsvText, effectiveState);
-    const requestKey = JSON.stringify(body);
+    const requestKey = JSON.stringify(effectiveState);
     if (requestKey === lastRequestKeyRef.current && initializedRef.current) return;
     lastRequestKeyRef.current = requestKey;
 
@@ -401,36 +725,31 @@ export default function StockPage() {
     setApiDetails("");
 
     try {
-      const response = await fetch("/api/trading/stock", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-
-      const data = (await response.json()) as ApiResponse;
-
-      if (!response.ok || !data.ok) {
-        setApiData(null);
-        if (!data.ok) {
-          setApiError(data.error || "Request failed.");
-          const details = Array.isArray(data.details) ? data.details.join(" | ") : data.details || "";
-          setApiDetails(details);
-        } else {
-          setApiError("Request failed.");
-          setApiDetails("");
+      let csvText = effectiveState.uploadedCsvText;
+      if (effectiveState.datasetMode !== "upload") {
+        const res = await fetch(datasetUrlMap[effectiveState.datasetMode]);
+        if (!res.ok) {
+          throw new Error(`Failed to load CSV (${res.status}) from ${datasetUrlMap[effectiveState.datasetMode]}`);
         }
-        return;
+        csvText = await res.text();
       }
+
+      if (!csvText) {
+        throw new Error("No CSV text available to parse.");
+      }
+
+      const parsedRows = parseCsv(csvText);
+      const data = buildApiSuccess(parsedRows, effectiveState);
 
       initializedRef.current = true;
       setApiData(data);
       setHasPendingChanges(false);
-      setTicker((current) => (overrides?.ticker !== undefined ? overrides.ticker : current) || data.defaults.ticker || "");
-      setStartDate((current) => (overrides?.startDate !== undefined ? overrides.startDate : current) || data.defaults.startDate || "");
-      setEndDate((current) => (overrides?.endDate !== undefined ? overrides.endDate : current) || data.defaults.endDate || "");
+      setTicker((overrides?.ticker ?? data.defaults.ticker ?? "") as string);
+      setStartDate((overrides?.startDate ?? data.defaults.startDate ?? "") as string);
+      setEndDate((overrides?.endDate ?? data.defaults.endDate ?? "") as string);
     } catch (error) {
       setApiData(null);
-      setApiError("Unable to reach the stock API route.");
+      setApiError("Unable to load stock CSV data.");
       setApiDetails(error instanceof Error ? error.message : String(error));
     } finally {
       setLoading(false);
@@ -438,10 +757,9 @@ export default function StockPage() {
   };
 
   useEffect(() => {
-    fetchData();
+    void fetchData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
 
   const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -540,7 +858,6 @@ export default function StockPage() {
     [apiData, chartData]
   );
 
-
   const groupedTickers = useMemo(() => {
     const allTickers = apiData?.tickers ?? [];
     const seen = allTickers.filter((item) => seenTickers.includes(item));
@@ -564,12 +881,12 @@ export default function StockPage() {
         <div>
           <h1 className="page-title">Stock Prediction Dashboard</h1>
           <p className="page-subtitle">
-            The dashboard reads the web-ready 10-ticker file, the web-ready 4-ticker file, or the bundled combined file directly. Only ticker selection and file upload refresh automatically. All other control changes wait for a manual refresh so the page stays stable and fast. The first load now opens in a tighter forecast-focused date window so the band stands out immediately.
+            The dashboard reads the web-ready 10-ticker file, the web-ready 4-ticker file, or the bundled combined file directly from public/data. Only ticker selection and file upload refresh automatically. All other control changes wait for a manual refresh so the page stays stable and fast.
           </p>
         </div>
         <div className="badge-row">
-          <span className={`badge ${setup?.pythonExists ? "good" : "warn"}`}>Python {setup?.pythonExists ? "ready" : "optional"}</span>
-          <span className={`badge ${setup?.modelExists ? "good" : "warn"}`}>Model {setup?.modelExists ? "ready" : "optional for scored CSVs"}</span>
+          <span className="badge warn">Python not required</span>
+          <span className="badge warn">Model not required</span>
           <span className={`badge ${setup?.dataExists ? "good" : "warn"}`}>Web data {setup?.dataExists ? "found" : "missing"}</span>
         </div>
       </div>
@@ -758,8 +1075,8 @@ export default function StockPage() {
         <div className="panel card">
           <h2>Historical vs forecast graph</h2>
           <p>{titleSummary}</p>
-          <div style={{ width: "100%", height: 500 }}>
-            <ResponsiveContainer>
+          <div style={{ width: "100%", minHeight: 500, height: 500 }}>
+            <ResponsiveContainer width="100%" height="100%">
               <ComposedChart data={chartData} margin={{ top: 10, right: 24, left: 8, bottom: 10 }}>
                 <CartesianGrid strokeDasharray="3 3" />
                 <XAxis dataKey="Date" minTickGap={28} />
